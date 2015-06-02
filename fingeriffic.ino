@@ -62,6 +62,7 @@ static bool config_mode;
 static float blade_width = 2.3;
 static float box_width = 5.0;
 static float wood_width = 100;
+static unsigned int position;
 
 void setup()
 {
@@ -94,6 +95,7 @@ void setup()
 	started = false;
 	config_mode = false;
 	state = MI_BLADE;
+	position = 0;
 }
 
 static void update_bouncers()
@@ -104,6 +106,19 @@ static void update_bouncers()
 	db_escape.update();
 	db_protect.update();
 }
+
+static unsigned int to_steps(float mm)
+{
+	float ratio = STEPS_PER_REV / MM_PER_REV;
+	/* FIXME: Check for eventual casting and rounding problems */
+	return (unsigned int)(ratio * mm);
+}
+
+static float to_mm(unsigned int steps) {
+	float ratio = MM_PER_REV / STEPS_PER_REV;
+	return ratio * steps;
+}
+
 
 static void update_menu()
 {
@@ -145,35 +160,29 @@ static void update_menu()
 
 	case MI_MOVE:
 	case MI_MOVE_CONF:
-		lcd.print("Moving to blade:");
+		lcd.print("Moving blade:");
+		if (state == MI_MOVE_CONF)
+			lcd.print(" (*)");
+
 		lcd.setCursor(0, 1);
-		lcd.print("xxx mm");
+		lcd.print(position);
+		lcd.print("steps, ");
+		lcd.print(to_mm(position), 2);
 		break;
 
 	case MI_RESET_CONF:
 	case MI_RESET:
 		lcd.setCursor(0, 1);
 		lcd.print("Reset");
-		if (state == MI_RESET_CONF)
+		if (state == MI_RESET_CONF) {
 			lcd.print(" (*)");
-		lcd.print("Moving to Zero ...");
+			lcd.print("Moving to Zero ...");
+		}
 		break;
 
 	case MI_START:
 		break;
 	}
-}
-
-static unsigned int to_steps(float mm)
-{
-	float ratio = STEPS_PER_REV / MM_PER_REV;
-	/* FIXME: Check for eventual casting and rounding problems */
-	return (unsigned int)(ratio * mm);
-}
-
-static float to_mm(unsigned int steps) {
-	float ratio = MM_PER_REV / STEPS_PER_REV;
-	return ratio * steps;
 }
 
 /*
@@ -305,10 +314,32 @@ static void handle_move_conf()
 {
 	if (db_up.read() == HIGH) {
 		rotate(to_steps(1.0), 0.5);
+		position++;
 	} else if (db_down.read() == HIGH) {
 		rotate(-1 * to_steps(1.0), 0.5);
+		position--;
 	} else if (db_escape.read() == HIGH) {
 		state = MI_MOVE;
+	}
+	delay(20);
+}
+
+static void handle_reset_conf()
+{
+	if (db_enter.read() == HIGH) {
+		rotate(-1 * position, .5);
+	} else if (db_escape.read() == HIGH) {
+		state = MI_RESET;
+	}
+	delay(20);
+}
+
+static void handle_start_init()
+{
+	if (db_enter.read() == HIGH) {
+		started = true;
+	} else if (db_escape.read() == HIGH) {
+		started = false;
 	}
 	delay(20);
 }
@@ -334,7 +365,11 @@ static void handle_state()
 			break;
 
 		case MI_RESET_CONF:
+			handle_reset_conf();
+			break;
+
 		case MI_START_INITIATED:
+			handle_start_init();
 			break;
 		}
 	} else {
