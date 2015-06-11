@@ -13,7 +13,7 @@
 #define MM_PER_REV 1.25
 
 /* Buttons */
-#define BTN_ENTER 1
+#define BTN_ENTER 8 /* FIXME: Should be 1 */
 #define BTN_UP 6
 #define BTN_DOWN 7
 #define BTN_ESCAPE 10
@@ -39,6 +39,17 @@ Bounce db_protect = Bounce();
 #define LCD_D7 2
 LiquidCrystal lcd(12, 11, 5, 4, 3, 2);
 
+/* DEGUG */
+
+#define DEBUG
+#if defined(DEBUG)
+#define DBG_PRINT(s) Serial.print(s)
+#define DBG_PRINTLN(s) Serial.println(s)
+#else
+#define DBG_PRINT(s)
+#define DBG_PRINTLN(s)
+#endif
+
 enum {
 	MI_BLADE,
 	MI_BLADE_CONF,
@@ -56,16 +67,46 @@ enum {
 };
 
 static unsigned char state;
+static unsigned char state_last;
+static unsigned char local_state;
+
 static bool started;
 static bool config_mode;
+
+static bool btn_enter;
+static bool btn_enter_last;
+static bool btn_up;
+static bool btn_up_last;
+static bool btn_down;
+static bool btn_down_last;
+static bool btn_escape;
+static bool btn_escape_last;
+static bool btn_protect;
+static bool btn_protect_last;
 
 static float blade_width = 2.3;
 static float box_width = 5.0;
 static float wood_width = 100;
 static unsigned int position;
 
+static void init_buttons()
+{
+	btn_enter = false;
+	btn_enter_last = false;
+	btn_up = false;
+	btn_up_last = false;
+	btn_down = false;
+	btn_down_last = false;
+	btn_escape = false;
+	btn_escape_last = false;
+	btn_protect = false;
+	btn_protect_last = false;
+	local_state = false;
+}
+
 void setup()
 {
+	Serial.begin(9600);
 	lcd.begin(16, 2);
 	lcd.print("Initializing ...");
 
@@ -89,8 +130,10 @@ void setup()
 	db_protect.attach(BTN_PROTECT);
 	db_protect.interval(5);
 
+	/* FIXME: Update later on when connecting a stepper
 	pinMode(DIR_PIN, OUTPUT);
 	pinMode(STEP_PIN, OUTPUT);
+	*/
 
 	started = false;
 	config_mode = false;
@@ -98,13 +141,22 @@ void setup()
 	position = 0;
 }
 
-static void update_bouncers()
+static void read_buttons()
 {
 	db_enter.update();
+	btn_enter = db_enter.read();
+
 	db_up.update();
+	btn_up = db_up.read();
+
 	db_down.update();
+	btn_down = db_down.read();
+
 	db_escape.update();
+	btn_escape = db_escape.read();
+
 	db_protect.update();
+	btn_protect = db_escape.read();
 }
 
 static unsigned int to_steps(float mm)
@@ -123,11 +175,13 @@ static float to_mm(unsigned int steps) {
 static void update_menu()
 {
 	lcd.setCursor(0, 0);
+	if (state != state_last)
+		lcd.clear();
 
 	switch (state) {
 	case MI_BLADE:
 	case MI_BLADE_CONF:
-		lcd.print("Blade width:");
+		lcd.print("Blade width");
 		if (state == MI_BLADE_CONF)
 			lcd.print(" (*)");
 
@@ -138,7 +192,7 @@ static void update_menu()
 
 	case MI_BOX_WIDTH:
 	case MI_BOX_WIDTH_CONF:
-		lcd.print("Box joint width:");
+		lcd.print("Box joint width");
 		if (state == MI_BOX_WIDTH_CONF)
 			lcd.print(" (*)");
 
@@ -149,7 +203,7 @@ static void update_menu()
 
 	case MI_WOOD_WIDTH:
 	case MI_WOOD_WIDTH_CONF:
-		lcd.print("Wood width:");
+		lcd.print("Wood width");
 		if (state == MI_WOOD_WIDTH_CONF)
 			lcd.print(" (*)");
 
@@ -160,7 +214,7 @@ static void update_menu()
 
 	case MI_MOVE:
 	case MI_MOVE_CONF:
-		lcd.print("Moving blade:");
+		lcd.print("Move sled");
 		if (state == MI_MOVE_CONF)
 			lcd.print(" (*)");
 
@@ -172,21 +226,31 @@ static void update_menu()
 
 	case MI_RESET_CONF:
 	case MI_RESET:
-		lcd.setCursor(0, 1);
-		lcd.print("Reset");
+		lcd.print("Reset sled pos");
 		if (state == MI_RESET_CONF) {
 			lcd.print(" (*)");
-			lcd.print("Moving to Zero ...");
+			lcd.setCursor(0, 1);
+			lcd.print("... working ...");
 		}
 		break;
 
 	case MI_START:
+		lcd.print("Start?");
+		if (state == MI_RESET_CONF) {
+			lcd.print(" (*)");
+			lcd.setCursor(0, 1);
+			lcd.print("... working ...");
+		}
+		break;
+
+	case MI_START_INITIATED:
+		lcd.print("Running ...");
 		break;
 	}
 }
 
 /*
- * rotate a specific number of degrees (negitive for reverse movement) speed is
+ * Rotate a specific number of degrees (negitive for reverse movement) speed is
  * any number from .01 -> 1 with 1 being fastest - Slower is stronger
  */
 void rotate_deg(float deg, float speed) {
@@ -206,8 +270,9 @@ void rotate_deg(float deg, float speed) {
 }
 
 /*
- * rotate a specific number of microsteps (8 microsteps per step) - (negitive *
- * for reverse movement) speed is any number from .01 -> 1 with 1 being fastest  * slower is stronger.
+ * Rotate a specific number of microsteps (8 microsteps per step) - (negitive
+ * for reverse movement) speed is any number from .01 -> 1 with 1 being fastest
+ * slower is stronger.
  */
 void rotate(int steps, float speed) {
 	int dir = (steps > 0) ? HIGH : LOW;
@@ -261,7 +326,7 @@ static void menu_up()
 	state += 2;
 
 	/* Check for wrapping */
-	if (state > MI_END)
+	if (state >= MI_END)
 		state = MI_BLADE;
 }
 
@@ -270,78 +335,82 @@ static void menu_down()
 	state -= 2;
 
 	/* Check for wrapping */
-	if (state > MI_END)
-		state = MI_END - 1;
+	if (state >= MI_END)
+		state = MI_END - 2;
 }
 
 static void handle_blade_conf()
 {
-	if (db_up.read() == HIGH) {
+	if (btn_up) {
 		blade_width += 0.1;
-	} else if (db_down.read() == HIGH) {
+	} else if (btn_down) {
 		blade_width -= 0.1;
-	} else if (db_escape.read() == HIGH) {
+	} else if (btn_escape) {
 		state = MI_BLADE;
 	}
-	delay(20);
+
+	if (blade_width < 0)
+		blade_width = 0;
 }
 
 static void handle_box_conf()
 {
-	if (db_up.read() == HIGH) {
+	if (btn_up) {
 		box_width += 0.1;
-	} else if (db_down.read() == HIGH) {
+	} else if (btn_down) {
 		box_width -= 0.1;
-	} else if (db_escape.read() == HIGH) {
+	} else if (btn_escape) {
 		state = MI_BOX_WIDTH;
 	}
-	delay(20);
+
+	if (box_width < 0)
+		box_width = 0;
 }
 
 static void handle_wood_conf()
 {
-	if (db_up.read() == HIGH) {
+	if (btn_up) {
 		wood_width += 0.1;
-	} else if (db_down.read() == HIGH) {
+	} else if (btn_down) {
 		wood_width -= 0.1;
-	} else if (db_escape.read() == HIGH) {
+	} else if (btn_escape) {
 		state = MI_WOOD_WIDTH;
 	}
-	delay(20);
+
+	if (wood_width < 0)
+		wood_width = 0;
 }
 
 static void handle_move_conf()
 {
-	if (db_up.read() == HIGH) {
+	if (btn_up) {
 		rotate(to_steps(1.0), 0.5);
 		position++;
-	} else if (db_down.read() == HIGH) {
+	} else if (btn_down) {
 		rotate(-1 * to_steps(1.0), 0.5);
 		position--;
-	} else if (db_escape.read() == HIGH) {
+	} else if (btn_escape) {
 		state = MI_MOVE;
 	}
-	delay(20);
 }
 
 static void handle_reset_conf()
 {
-	if (db_enter.read() == HIGH) {
+	if (btn_enter) {
 		rotate(-1 * position, .5);
-	} else if (db_escape.read() == HIGH) {
+	} else if (btn_escape) {
 		state = MI_RESET;
 	}
-	delay(20);
 }
 
 static void handle_start_init()
 {
-	if (db_enter.read() == HIGH) {
+	if (btn_enter) {
 		started = true;
-	} else if (db_escape.read() == HIGH) {
+	} else if (btn_escape) {
 		started = false;
+		state = MI_START;
 	}
-	delay(20);
 }
 
 static void handle_state()
@@ -372,55 +441,102 @@ static void handle_state()
 			handle_start_init();
 			break;
 		}
-	} else {
-		if (db_up.read() == HIGH) {
-			switch (state) {
-			case MI_BLADE:
-			case MI_BOX_WIDTH:
-			case MI_WOOD_WIDTH:
-			case MI_MOVE:
-			case MI_RESET:
-			case MI_START:
-				menu_up();
+		if (btn_escape != btn_escape_last) {
+			if (btn_escape) {
+				config_mode = false;
 			}
-		} else if (db_down.read() == HIGH) {
-			switch (state) {
-			case MI_BLADE:
-			case MI_BOX_WIDTH:
-			case MI_WOOD_WIDTH:
-			case MI_MOVE:
-			case MI_RESET:
-			case MI_START:
-				menu_down();
-			}
-		} else if (db_enter.read() == HIGH) {
-			/*
-			 * We can do like this as long as the enum consists of
-			 * menu, conf, menu, conf ..
-			 */
-			state += 1;
-			config_mode = true;
 		}
+	} else {
+		if (btn_up != btn_up_last) {
+			if (btn_up) {
+				switch (state) {
+				case MI_BLADE:
+				case MI_BOX_WIDTH:
+				case MI_WOOD_WIDTH:
+				case MI_MOVE:
+				case MI_RESET:
+				case MI_START:
+				menu_up();
+				DBG_PRINTLN("up pressed");
+				}
+			} else {
+				DBG_PRINTLN("up released");
+			}
+			btn_up_last = btn_up;
+		} else if (btn_down != btn_down_last) {
+			if (btn_down) {
+				switch (state) {
+				case MI_BLADE:
+				case MI_BOX_WIDTH:
+				case MI_WOOD_WIDTH:
+				case MI_MOVE:
+				case MI_RESET:
+				case MI_START:
+					menu_down();
+				DBG_PRINTLN("down pressed");
+				}
+			} else {
+				DBG_PRINTLN("down released");
+			}
+			btn_down_last = btn_down;
+		} else if (btn_enter != btn_enter_last) {
+			if (btn_enter) {
+				/*
+				 * We can do like this as long as the enum
+				 * consists of menu, conf, menu, conf ..
+				 */
+				state += 1;
+				config_mode = true;
+				DBG_PRINTLN("enter pressed");
+			} else {
+				DBG_PRINTLN("enter released");
+			}
+			btn_enter_last = btn_enter;
+		}
+	}
+	state_last = state;
+}
+
+static void handle_running()
+{
+	/* Check if we want to stop running */
+	if (btn_escape != btn_escape_last) {
+		if (btn_escape) {
+			config_mode = false;
+			started = false;
+			state = MI_START;
+		}
+	}
+
+	/*
+	 * Check that the protect button is set before trying to run
+	 * the stepper motor
+	 */
+	if (digitalRead(BTN_PROTECT) == 1) {
+		// Run the
+	} else {
+		// Print an error message?
 	}
 }
 
 void loop()
 {
-	update_bouncers();
-	handle_state();
-	update_menu();
+	read_buttons();
 
 	if (started) {
-		/*
-		 * Check that the protect button is set before trying to run the
-		 * stepper motor
-		 */
-		if (digitalRead(BTN_PROTECT) == 1) {
-			// Run the
-		} else {
-			// Print an error message?
-		}
+		handle_running();
 	} else {
-		// Configure ...
+		handle_state();
 	}
+
+	update_menu();
+
+#if defined(DEBUG)
+	if (state != local_state) {
+		DBG_PRINT("State: ");
+		DBG_PRINTLN(state);
+	}
+
+	local_state = state;
+#endif
 }
